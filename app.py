@@ -318,6 +318,58 @@ def model_probability_for_match(match: dict, n_sim: int) -> dict:
         "form_ratio": form_ratio,
         "h2h_ratio": h2h_ratio,
     }
+    # ====================
+# Kehittynyt malli: syöttö, palautus, paineensieto
+# ====================
+def advanced_probabilities(p1_key, p2_key, surface="hard"):
+    p1 = fetch_player(p1_key)
+    p2 = fetch_player(p2_key)
+
+    def extract_stats(player):
+        if not player:
+            return {}
+        stats = player.get("stats")
+        if not stats:
+            return {}
+        latest = sorted(stats, key=lambda x: x.get("season", ""), reverse=True)[0]
+        return {
+            "first_serve_pct": float(latest.get("first_serve_in", 0) or 0),
+            "first_serve_won": float(latest.get("first_serve_points_won", 0) or 0),
+            "second_serve_won": float(latest.get("second_serve_points_won", 0) or 0),
+            "return_pts_won": float(latest.get("return_points_won", 0) or 0),
+            "break_pts_saved": float(latest.get("break_points_saved", 0) or 0),
+            "break_pts_converted": float(latest.get("break_points_converted", 0) or 0),
+            "tiebreaks_won": float(latest.get("tiebreaks_won", 0) or 0),
+            "matches_won": int(latest.get("matches_won", 0) or 0),
+            "matches_lost": int(latest.get("matches_lost", 0) or 0),
+        }
+
+    s1 = extract_stats(p1)
+    s2 = extract_stats(p2)
+
+    def score(stats):
+        if not stats:
+            return 1.0
+        score_val = (
+            0.2 * stats.get("first_serve_pct", 0) +
+            0.25 * stats.get("first_serve_won", 0) +
+            0.15 * stats.get("second_serve_won", 0) +
+            0.2 * stats.get("return_pts_won", 0) +
+            0.1 * stats.get("break_pts_saved", 0) +
+            0.05 * stats.get("tiebreaks_won", 0)
+        )
+        wl_total = stats.get("matches_won", 0) + stats.get("matches_lost", 0)
+        if wl_total > 0:
+            score_val += 0.2 * (stats.get("matches_won", 0) / wl_total)
+        return score_val
+
+    s1_score = score(s1)
+    s2_score = score(s2)
+
+    total = s1_score + s2_score
+    if total == 0:
+        return 0.5, 0.5
+    return s1_score / total, s2_score / total
 
 # -------------------------------------------------
 # Kertoimien parsinta
