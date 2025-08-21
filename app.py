@@ -5,7 +5,8 @@ import pandas as pd
 import numpy as np
 from datetime import date, datetime, timedelta
 import altair as alt
-
+url = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-matches.csv"
+tennis_stats = pd.read_csv(url)
 # =========================================
 # Asetukset
 # =========================================
