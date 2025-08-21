@@ -7,6 +7,12 @@ from datetime import date, datetime, timedelta
 import altair as alt
 url = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-matches.csv"
 tennis_stats = pd.read_csv(url)
+def get_player_stats(player_name):
+    # yritetään matchata pelaajan nimi dataan
+    row = tennis_stats[tennis_stats["player"].str.contains(player_name, case=False, na=False)]
+    if not row.empty:
+        return row.iloc[0].to_dict()
+    return None
 # =========================================
 # Asetukset
 # =========================================
