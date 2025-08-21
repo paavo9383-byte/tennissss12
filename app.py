@@ -5,26 +5,6 @@ import pandas as pd
 import numpy as np
 from datetime import date, datetime, timedelta
 import altair as alt
-url = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-matches.csv"
-tennis_stats = pd.read_csv(url)
-def get_player_stats(player_name):
-    # yritetään matchata pelaajan nimi dataan
-    row = tennis_stats[tennis_stats["player"].str.contains(player_name, case=False, na=False)]
-    if not row.empty:
-        return row.iloc[0].to_dict()
-    return None
-    stats1 = get_player_stats(match["event_first_player"])
-stats2 = get_player_stats(match["event_second_player"])
-
-if stats1 and stats2:
-    p1_hold = stats1.get("hold_pct", 0.7)
-    p2_hold = stats2.get("hold_pct", 0.7)
-
-    # arvioidaan todennäköisyys pelaajan 1 voitolle
-    prob1 = p1_hold / (p1_hold + (1 - p2_hold))
-    prob2 = 1 - prob1
-else:
-    prob1, prob2 = 0.5, 0.5
 # =========================================
 # Asetukset
 # =========================================
