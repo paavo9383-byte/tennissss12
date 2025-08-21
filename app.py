@@ -10,19 +10,28 @@ BASE_URL = "https://api.api-tennis.com/tennis/"
 
 st.title("🎾 Ammattilainen Tennis Betting Model")
 
-# 1️⃣ Hae käynnissä olevat ottelut API:sta
+# 1️⃣ Hae ottelut turvallisesti
 @st.cache_data
 def get_matches():
     url = f"{BASE_URL}?method=get_events&APIkey={API_KEY}"
     try:
         r = requests.get(url)
+        st.write("API status code:", r.status_code)
+        st.write("API response preview:", r.text[:500])  # Näyttää max 500 merkkiä
+
         if r.status_code != 200:
-            st.error(f"API virhe: {r.status_code}")
+            st.error(f"API virhe: {r.status_code}. Tarkista API-avaimesi tai subscription.")
             return []
-        data = r.json()
-        return data.get("result", [])
+
+        # Yritetään parsia JSON
+        try:
+            data = r.json()
+            return data.get("result", [])
+        except Exception as e:
+            st.error("API ei palauttanut JSONia. Tarkista API-avaimesi ja subscription.")
+            return []
     except Exception as e:
-        st.error(f"Virhe API-haussa: {e}")
+        st.error(f"HTTP virhe: {e}")
         return []
 
 matches = get_matches()
@@ -30,32 +39,17 @@ matches = get_matches()
 if not matches:
     st.warning("Ei otteludataa saatavilla.")
 else:
-    match_options = {f"{m['home']} vs {m['away']}": m for m in matches}
+    match_options = {f"{m.get('home','?')} vs {m.get('away','?')}": m for m in matches}
     selected_match = st.selectbox("Valitse ottelu", list(match_options.keys()))
 
     if selected_match:
         match = match_options[selected_match]
-        home, away = match["home"], match["away"]
-
+        home, away = match.get("home", "?"), match.get("away", "?")
         st.subheader(f"{home} vs {away}")
 
-        # 2️⃣ Hae pelaajatilastot
-        def get_player_stats(player_id):
-            url = f"{BASE_URL}?method=get_players&player_id={player_id}&APIkey={API_KEY}"
-            try:
-                r = requests.get(url)
-                if r.status_code != 200:
-                    st.warning(f"Pelaajadataa ei saatavilla ({player_id})")
-                    return {}
-                return r.json().get("result", [{}])[0]
-            except:
-                return {}
-
-        home_stats = get_player_stats(match.get("homeID", 0))
-        away_stats = get_player_stats(match.get("awayID", 0))
-
-        a_serve = float(home_stats.get("firstServeWon", 65))
-        b_serve = float(away_stats.get("firstServeWon", 65))
+        # 2️⃣ Simuloidaan vain placeholder-statistiikalla, jos pelaajadataa ei ole
+        a_serve = float(match.get("homeServeWon", 65)) if "homeServeWon" in match else 65
+        b_serve = float(match.get("awayServeWon", 65)) if "awayServeWon" in match else 65
 
         st.write(f"{home} syöttöpisteiden voitto-%: {a_serve}")
         st.write(f"{away} syöttöpisteiden voitto-%: {b_serve}")
