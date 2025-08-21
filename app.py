@@ -2,7 +2,9 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+import re
 from datetime import date, datetime, timedelta
+import altair as alt
 
 # -------------------------------------------------
 # Asetukset
@@ -34,15 +36,30 @@ def _normalize(p1, p2, floor=0.02):
     p2 = 1 - p1
     return p1, p2
 
-def _parse_time(ts: str):
-    if not isinstance(ts, str):
+def _extract_hhmm_from_any(s: str):
+    if not isinstance(s, str):
         return "-"
-    for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"]:
+    m = re.search(r'(\d{1,2}):(\d{2})', s)
+    if m:
+        hh = int(m.group(1)); mm = int(m.group(2))
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return f"{hh:02d}:{mm:02d}"
+    # yritä tunnettuja formaatteja
+    for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"]:
         try:
-            dt = datetime.strptime(ts, fmt)
+            dt = datetime.strptime(s, fmt)
             return dt.strftime("%H:%M")
         except Exception:
             continue
+    return "-"
+
+def get_match_time_str(match: dict) -> str:
+    # Etsi todennäköisin kellonaika eri kentistä
+    for k in ["event_time", "event_start_time", "event_time_utc", "event_date_time", "event_date"]:
+        v = match.get(k)
+        hhmm = _extract_hhmm_from_any(v) if v else "-"
+        if hhmm != "-":
+            return hhmm
     return "-"
 
 def _implied_from_odds(o1, o2):
@@ -56,7 +73,7 @@ def _implied_from_odds(o1, o2):
     return p1 / s, p2 / s
 
 # -------------------------------------------------
-# API-kutsut (vanha Streamlit-yhteensopiva cache)
+# API-kutsut (cache)
 # -------------------------------------------------
 @st.cache(allow_output_mutation=True, show_spinner=False)
 def fetch_fixtures(date_str):
@@ -363,10 +380,10 @@ def kelly(prob, odds, bankroll, fraction=0.5):
 st.title("🎾 Tennis-ennusteet (simulaatiomalli + value + Kelly)")
 
 today = date.today()
-sel_date = st.sidebar.date_input("Päivämäärä", value=today)
-match_type = st.sidebar.selectbox("Ottelutyyppi", ["Kaikki", "Live", "Tulevat"])
-n_sim = st.sidebar.slider("Simulaatioiden määrä / ottelu", min_value=1000, max_value=20000, step=1000, value=5000)
-bankroll = st.sidebar.number_input("Bankroll (€)", value=1000, step=100)
+sel_date = st.sidebar.date_input("Päivämäärä", value=today, key="date_input_main")
+match_type = st.sidebar.selectbox("Ottelutyyppi", ["Kaikki", "Live", "Tulevat"], key="match_type_sel")
+n_sim = st.sidebar.slider("Simulaatioiden määrä / ottelu", min_value=1000, max_value=20000, step=1000, value=5000, key="sim_per_match")
+bankroll = st.sidebar.number_input("Bankroll (€)", value=1000, step=100, key="bankroll_input")
 
 # -------------------------------------------------
 # Hae ottelut ja suodata
@@ -378,7 +395,7 @@ elif match_type == "Tulevat":
     fixtures = [m for m in fixtures if m.get("event_live") == "0" and not m.get("event_status")]
 
 tournaments = sorted({m.get("tournament_name", "-") for m in fixtures})
-sel_tournaments = st.sidebar.multiselect("Turnaus", options=tournaments, default=tournaments)
+sel_tournaments = st.sidebar.multiselect("Turnaus", options=tournaments, default=tournaments, key="tournaments_multi")
 if sel_tournaments:
     fixtures = [m for m in fixtures if m.get("tournament_name", "-") in sel_tournaments]
 
@@ -389,7 +406,7 @@ rows = []
 for match in fixtures:
     p1 = match.get("event_first_player", "-")
     p2 = match.get("event_second_player", "-")
-    start_str = _parse_time(match.get("event_date"))
+    start_str = get_match_time_str(match)
     tourn = match.get("tournament_name", "-")
     event_key = match.get("event_key")
 
@@ -399,7 +416,7 @@ for match in fixtures:
     odds_data = fetch_odds(event_key)
     o1, o2 = extract_two_way_odds(odds_data)
 
-    # markkinakalibrointi (maltillinen), vähentää 100–0 outliereita
+    # markkinakalibrointi (maltillinen)
     if o1 and o2:
         imp1, imp2 = _implied_from_odds(o1, o2)
         if imp1 and imp2:
@@ -429,27 +446,28 @@ for match in fixtures:
         "Edge 2 %": round(edge2, 1) if edge2 is not None else None,
         "Kelly 1 (€)": round(k1, 2),
         "Kelly 2 (€)": round(k2, 2),
+        "event_key": event_key  # talteen jos halutaan porautua myöhemmin
     })
 
 df = pd.DataFrame(rows, columns=[
     "Aika","Pelaaja 1","Pelaaja 2","Turnaus","Surface",
     "Kerroin 1","Kerroin 2","Malli P1 %","Malli P2 %",
-    "Fair 1","Fair 2","Edge 1 %","Edge 2 %","Kelly 1 (€)","Kelly 2 (€)"
+    "Fair 1","Fair 2","Edge 1 %","Edge 2 %","Kelly 1 (€)","Kelly 2 (€)","event_key"
 ])
-
-st.dataframe(df, use_container_width=True)
+st.dataframe(df.drop(columns=["event_key"]), use_container_width=True)
 st.caption("Malli yhdistää: simulaation (hold/break), alustan, formikunnon ja H2H:n. Markkinakalibrointi vähentää yli-itsevarmuutta. Edge = oma todennäköisyys − implied (%‑yks.). Kelly = puolikas Kelly.")
 
 # -------------------------------------------------
-# Value bets (Top 10)
+# Arvo (value) – yhteinen laskenta kaikille näkymille
 # -------------------------------------------------
-with st.expander("🔥 Päivän Top 10 Value Bets"):
-    value_rows = []
+def compute_value_rows(fixtures, bankroll, n_sim):
+    out = []
     for match in fixtures:
         p1 = match.get("event_first_player", "-")
         p2 = match.get("event_second_player", "-")
-        event_key = match.get("event_key")
         tourn = match.get("tournament_name", "-")
+        tstr = get_match_time_str(match)
+        event_key = match.get("event_key")
 
         odds_data = fetch_odds(event_key)
         o1, o2 = extract_two_way_odds(odds_data)
@@ -460,7 +478,7 @@ with st.expander("🔥 Päivän Top 10 Value Bets"):
         p1_prob, p2_prob = model["p1"], model["p2"]
 
         imp1, imp2 = _implied_from_odds(o1, o2)
-        if imp1 is None:
+        if imp1 is None or imp2 is None:
             continue
 
         # pieni markkinashrinkkaus
@@ -469,31 +487,88 @@ with st.expander("🔥 Päivän Top 10 Value Bets"):
 
         v1 = p1_prob - imp1
         v2 = p2_prob - imp2
-        best_side = "1" if v1 > v2 else "2"
-        best_edge = max(v1, v2)
 
-        if best_edge > 0:
-            odds_sel = o1 if best_side == "1" else o2
-            k_stake, _ = kelly(p1_prob if best_side == "1" else p2_prob, odds_sel, bankroll, fraction=0.5)
-            value_rows.append({
-                "Aika": _parse_time(match.get("event_date")),
+        ev1 = p1_prob * o1 - 1.0
+        ev2 = p2_prob * o2 - 1.0
+
+        k1, _ = kelly(p1_prob, o1, bankroll, fraction=0.5)
+        k2, _ = kelly(p2_prob, o2, bankroll, fraction=0.5)
+
+        if v1 > 0:
+            out.append({
+                "Aika": tstr,
                 "Ottelu": f"{p1} vs {p2}",
                 "Turnaus": tourn,
-                "Puoli": best_side,
-                "Edge %": round(best_edge*100, 2),
-                "Kerroin": round(odds_sel, 2),
-                "Malli %": round((p1_prob if best_side=="1" else p2_prob)*100, 1),
-                "Kelly (€)": round(k_stake, 2),
+                "Puoli": "1",
+                "Kerroin": round(o1, 2),
+                "Malli %": round(p1_prob*100, 1),
+                "Edge %": round(v1*100, 2),
+                "EV %": round(ev1*100, 2),
+                "Kelly (€)": round(k1, 2),
+                "event_key": event_key
             })
+        if v2 > 0:
+            out.append({
+                "Aika": tstr,
+                "Ottelu": f"{p1} vs {p2}",
+                "Turnaus": tourn,
+                "Puoli": "2",
+                "Kerroin": round(o2, 2),
+                "Malli %": round(p2_prob*100, 1),
+                "Edge %": round(v2*100, 2),
+                "EV %": round(ev2*100, 2),
+                "Kelly (€)": round(k2, 2),
+                "event_key": event_key
+            })
+    return out
 
-    if value_rows:
-        top10 = pd.DataFrame(sorted(value_rows, key=lambda x: x["Edge %"], reverse=True)[:10])
-        st.table(top10)
+value_rows_all = compute_value_rows(fixtures, bankroll, n_sim)
+
+# -------------------------------------------------
+# Paras value nyt (yhdellä napilla)
+# -------------------------------------------------
+st.markdown("### 🏅 Paras value juuri nyt")
+metric = st.radio(
+    "Valitse metriikka",
+    ["Suurin Edge %", "Suurin Kelly (€)", "Suurin EV %"],
+    horizontal=True,
+    key="best_value_metric"
+)
+
+go_best = st.button("Etsi paras value nyt", key="best_value_btn")
+if go_best:
+    if value_rows_all:
+        if metric == "Suurin Edge %":
+            best = max(value_rows_all, key=lambda x: x["Edge %"])
+        elif metric == "Suurin Kelly (€)":
+            best = max(value_rows_all, key=lambda x: x["Kelly (€)"])
+        else:
+            best = max(value_rows_all, key=lambda x: x["EV %"])
+
+        st.success(
+            f"**{best['Ottelu']}** ({best['Turnaus']}, {best['Aika']})\n\n"
+            f"- **Puoli**: {best['Puoli']}  \n"
+            f"- **Kerroin**: {best['Kerroin']}  \n"
+            f"- **Malli**: {best['Malli %']}%  \n"
+            f"- **Edge**: {best['Edge %']}%  \n"
+            f"- **EV**: {best['EV %']}%  \n"
+            f"- **Kelly**: {best['Kelly (€)']} €"
+        )
+    else:
+        st.info("Ei value-kohteita valituilla suodattimilla juuri nyt.")
+
+# -------------------------------------------------
+# Value bets (Top 10)
+# -------------------------------------------------
+with st.expander("🔥 Päivän Top 10 Value Bets"):
+    if value_rows_all:
+        top10 = pd.DataFrame(sorted(value_rows_all, key=lambda x: x["Edge %"], reverse=True)[:10])
+        st.table(top10.drop(columns=["event_key"]))
     else:
         st.info("Ei value-kohteita valituille suodattimille.")
 
 # -------------------------------------------------
-# Monte Carlo -visualisaatio
+# Monte Carlo -visualisaatio (Altair, ei matplotlibia)
 # -------------------------------------------------
 st.markdown("---")
 st.subheader("📈 Monte Carlo ‑visualisaatio (malli vs. markkina)")
@@ -547,25 +622,20 @@ def run_mc_for_match(match: dict, n_iter: int = 8000, shrink_to_market: float = 
         return [], 0.5, (None, None)
 
     odds_data = fetch_odds(match.get("event_key"))
-    # käytä samaa odds-parsintaa
     o1, o2 = extract_two_way_odds(odds_data)
     imp1 = (1/o1)/(1/o1 + 1/o2) if (o1 and o2) else None
     imp2 = 1 - imp1 if imp1 is not None else None
 
-    # point estimate mallista
     model = model_probability_for_match(match, n_sim=max(2000, n_iter//4))
     p1_point = model["p1"]
 
-    # hold/return peruspisteet
-    h1, r1 = _get_hold_return_for_player(p1_key)
-    h2, r2 = _get_hold_return_for_player(p2_key)
+    h1, _ = _get_hold_return_for_player(p1_key)
+    h2, _ = _get_hold_return_for_player(p2_key)
 
-    # MC – nopea malli jakaumaan
     samples = []
     for _ in range(n_iter):
         h1_s = _sample_beta_around(h1, strength=300)
         h2_s = _sample_beta_around(h2, strength=300)
-        # set-win approksimaatio
         set_p = _clamp(0.5 + (h1_s - h2_s)/4.0, 0.15, 0.85)
         match_p = _clamp(set_p*set_p*(3 - 2*set_p), 0.05, 0.95)  # Bo3 approx
         if imp1 is not None:
@@ -574,99 +644,58 @@ def run_mc_for_match(match: dict, n_iter: int = 8000, shrink_to_market: float = 
 
     return samples, p1_point, (imp1, imp2)
 
-# UI ohjaimet
-match_labels = [f"{m.get('event_first_player','-')} vs {m.get('event_second_player','-')} — {m.get('tournament_name','-')} ({_parse_time(m.get('event_date'))})" for m in fixtures]
-selected_idx = st.selectbox("Valitse ottelu", options=list(range(len(fixtures))) if fixtures else [0],
-                            format_func=lambda i: match_labels[i] if fixtures else "-", index=0 if fixtures else 0)
+match_labels = [
+    f"{m.get('event_first_player','-')} vs {m.get('event_second_player','-')} — {m.get('tournament_name','-')} ({get_match_time_str(m)})"
+    for m in fixtures
+]
+selected_idx = st.selectbox(
+    "Valitse ottelu",
+    options=list(range(len(fixtures))) if fixtures else [0],
+    format_func=lambda i: match_labels[i] if fixtures else "-",
+    index=0 if fixtures else 0,
+    key="mc_match_select"
+)
 
 mc_cols = st.columns([2,1,1,1])
 with mc_cols[1]:
-    n_iter = st.number_input("Simulointeja", min_value=1000, max_value=40000, step=1000, value=8000)
+    n_iter = st.number_input("Simulointeja", min_value=1000, max_value=40000, step=1000, value=8000, key="mc_iters")
 with mc_cols[2]:
     shrink = st.slider("Kalibrointi markkinaan", min_value=0.0, max_value=0.6, value=0.25, step=0.05,
-                       help="0 = ei shrinkkausta, 0.25 = maltillinen, 0.5 = vahva")
+                       help="0 = ei shrinkkausta, 0.25 = maltillinen, 0.5 = vahva", key="mc_shrink")
 with mc_cols[3]:
-    run_btn = st.button("Simuloi & piirrä")
+    run_btn = st.button("Simuloi & piirrä", key="mc_run_btn")
 
 if run_btn and fixtures:
     m = fixtures[selected_idx]
     samples, point_est, implied = run_mc_for_match(m, n_iter=int(n_iter), shrink_to_market=shrink)
 
     if samples:
-        import matplotlib.pyplot as plt
-        fig = plt.figure(figsize=(8,4))
-        plt.hist(samples, bins=40, alpha=0.85)
-        plt.xlabel("P1 voittotodennäköisyys")
-        plt.ylabel("Frekvenssi")
-        plt.axvline(point_est, linestyle="--")  # mallin point
+        samp_df = pd.DataFrame({"p": samples})
+        # Histogrammi ja ohjeviivat
+        hist = alt.Chart(samp_df).mark_bar().encode(
+            alt.X("p:Q", bin=alt.Bin(maxbins=40), title="P1 voittotodennäköisyys"),
+            alt.Y("count():Q", title="Frekvenssi"),
+            tooltip=[alt.Tooltip("count():Q", title="Frekvenssi")]
+        ).properties(width=800, height=300)
+
+        rules = []
+        rules.append(alt.Chart(pd.DataFrame({"x": [point_est], "label": ["Malli point"]}))
+                    .mark_rule(strokeDash=[6,3]).encode(x="x:Q"))
         if implied[0] is not None:
-            plt.axvline(implied[0], linestyle=":")  # markkina
-        plt.title(f"Jakauma: {m.get('event_first_player','-')} vs {m.get('event_second_player','-')}")
-        st.pyplot(fig, use_container_width=True)
+            rules.append(alt.Chart(pd.DataFrame({"x": [implied[0]], "label": ["Markkina"]}))
+                        .mark_rule(strokeDash=[2,2]).encode(x="x:Q"))
+
+        chart = hist
+        for r in rules:
+            chart = chart + r
+
+        st.altair_chart(chart, use_container_width=True)
 
         p_low, p_med, p_high = np.percentile(samples, [5, 50, 95])
         st.markdown(
-            f"**Mallin pointti**: {point_est*100:.1f}% &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"**Malli point**: {point_est*100:.1f}% &nbsp;&nbsp;|&nbsp;&nbsp; "
             f"**MC mediaani**: {p_med*100:.1f}% (5–95%: {p_low*100:.1f}–{p_high*100:.1f}%) "
             + (f"&nbsp;&nbsp;|&nbsp;&nbsp; **Implied**: {implied[0]*100:.1f}%" if implied[0] is not None else "")
         )
     else:
         st.info("Ei riittäviä tietoja simulaatioon tälle ottelulle.")
-        # ====================
-# Top 10 value bets
-# ====================
-if st.button("Näytä Top 10 value bets"):
-    if match_values:
-        top10 = sorted(match_values, key=lambda x: x["value"], reverse=True)[:10]
-        df_top = pd.DataFrame([{
-            "Ottelu": m["match"],
-            "Pelaaja": m["player"],
-            "Todennäköisyys %": f"{m['prob']*100:.1f}%",
-            "Kerroin": f"{m['odds']:.2f}",
-            "Odotusarvo": f"{m['value']:.2f}"
-        } for m in top10])
-        
-        st.subheader("Top 10 value bets")
-        st.table(df_top)
-    else:
-        st.warning("Ei tarpeeksi dataa Top 10 -listaan.")
-# ====================
-# Lasketaan kaikki value-betsit
-# ====================
-match_values = []
-for match in fixtures:
-    odds_data = fetch_odds(match["event_key"])
-    if not odds_data or "Home/Away" not in odds_data:
-        continue
-
-    home_vals = odds_data["Home/Away"].get("Home", {})
-    away_vals = odds_data["Home/Away"].get("Away", {})
-    home_odds = [float(v) for v in home_vals.values() if v]
-    away_odds = [float(v) for v in away_vals.values() if v]
-    if not home_odds or not away_odds:
-        continue
-
-    max_home = max(home_odds)
-    max_away = max(away_odds)
-
-    prob1, prob2 = calculate_probabilities(
-        match["first_player_key"], match["second_player_key"]
-    )
-
-    ev_home = prob1 * max_home
-    ev_away = prob2 * max_away
-
-    match_values.append({
-        "match": f"{match['event_first_player']} vs {match['event_second_player']}",
-        "player": match["event_first_player"],
-        "prob": prob1,
-        "odds": max_home,
-        "value": ev_home
-    })
-    match_values.append({
-        "match": f"{match['event_first_player']} vs {match['event_second_player']}",
-        "player": match["event_second_player"],
-        "prob": prob2,
-        "odds": max_away,
-        "value": ev_away
-    })
