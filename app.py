@@ -593,7 +593,6 @@ if run_btn and fixtures:
     samples, point_est, implied = run_mc_for_match(m, n_iter=int(n_iter), shrink_to_market=shrink)
 
     if samples:
-        import matplotlib.pyplot as plt
         fig = plt.figure(figsize=(8,4))
         plt.hist(samples, bins=40, alpha=0.85)
         plt.xlabel("P1 voittotodennäköisyys")
