@@ -163,6 +163,36 @@ def fetch_odds(match_key):
     except Exception:
         pass
     return {}
+    def advanced_probabilities(p1_key, p2_key):
+    """Laskee todennäköisyydet huomioiden syöttö/return, breikit, paineensieto, rasitus jne."""
+    p1 = fetch_player(p1_key)
+    p2 = fetch_player(p2_key)
+
+    def player_strength(player):
+        if not player or not player.get("stats"):
+            return 0.5
+        stats = sorted(player["stats"], key=lambda x: x.get("season", ""), reverse=True)[0]
+
+        try:
+            serve_points = float(stats.get("first_serve_points_won") or 50) / 100
+            return_points = float(stats.get("return_points_won") or 30) / 100
+            bp_saved = float(stats.get("break_points_saved") or 50) / 100
+            bp_converted = float(stats.get("break_points_converted") or 40) / 100
+            matches_won = int(stats.get("matches_won") or 0)
+            matches_lost = int(stats.get("matches_lost") or 0)
+            fatigue = max(0, 1 - (matches_won+matches_lost)/100)
+
+            return (0.4*serve_points + 0.3*return_points +
+                    0.15*bp_saved + 0.15*bp_converted) * fatigue
+        except:
+            return 0.5
+
+    s1 = player_strength(p1)
+    s2 = player_strength(p2)
+    if s1 + s2 == 0:
+        return 0.5, 0.5
+
+    return s1/(s1+s2), s2/(s1+s2)
 
 # -------------------------------------------------
 # Ominaisuudet / tilastot
