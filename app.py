@@ -1,93 +1,118 @@
 import requests
 import streamlit as st
 import numpy as np
+from datetime import date
 
-# 🔑 Oma API-avain
+# 🔑 API-avain
 API_KEY = "52a26b83b9dcb13ebcf0790bbac97ea14eeaaf75f88ec4661f98b9ab9009bf76"
 
-# 🔗 Oikea endpoint
+# 🔗 Base URL
 BASE_URL = "https://api.api-tennis.com/tennis/"
 
-st.title("🎾 Ammattilainen Tennis Betting Model")
+st.title("🎾 Tennis Analyzer App")
 
-# 1️⃣ Hae ottelut turvallisesti
-@st.cache_data
-def get_matches():
-    url = f"{BASE_URL}?method=get_events&APIkey={API_KEY}"
+# ===============================
+# 1️⃣ Turvallinen JSON-pyyntö
+# ===============================
+def fetch_api(method, extra_params=""):
+    url = f"{BASE_URL}?method={method}&APIkey={API_KEY}{extra_params}"
     try:
         r = requests.get(url)
-        st.write("API status code:", r.status_code)
-        st.write("API response preview:", r.text[:500])  # Näyttää max 500 merkkiä
-
+        st.write(f"API status ({method}):", r.status_code)
         if r.status_code != 200:
-            st.error(f"API virhe: {r.status_code}. Tarkista API-avaimesi tai subscription.")
+            st.error(f"{method} API virhe: {r.status_code}")
             return []
-
-        # Yritetään parsia JSON
         try:
             data = r.json()
             return data.get("result", [])
-        except Exception as e:
-            st.error("API ei palauttanut JSONia. Tarkista API-avaimesi ja subscription.")
+        except:
+            st.error(f"{method} ei palauttanut JSONia.")
             return []
     except Exception as e:
-        st.error(f"HTTP virhe: {e}")
+        st.error(f"{method} HTTP virhe: {e}")
         return []
 
-matches = get_matches()
+# ===============================
+# 2️⃣ Hae turnaukset
+# ===============================
+st.subheader("Turnaukset")
+tournaments = fetch_api("get_tournaments")
+tournament_options = {t.get("name", "N/A"): t for t in tournaments}
+selected_tournament = st.selectbox("Valitse turnaus", list(tournament_options.keys()))
 
-if not matches:
-    st.warning("Ei otteludataa saatavilla.")
-else:
+# ===============================
+# 3️⃣ Hae ottelut valitusta turnauksesta
+# ===============================
+st.subheader("Ottelut")
+if selected_tournament:
+    tourn_id = tournament_options[selected_tournament].get("id", 0)
+    matches = fetch_api("get_events", f"&tournament_id={tourn_id}")
     match_options = {f"{m.get('home','?')} vs {m.get('away','?')}": m for m in matches}
     selected_match = st.selectbox("Valitse ottelu", list(match_options.keys()))
 
-    if selected_match:
-        match = match_options[selected_match]
-        home, away = match.get("home", "?"), match.get("away", "?")
-        st.subheader(f"{home} vs {away}")
+# ===============================
+# 4️⃣ Näytä ottelun tiedot
+# ===============================
+if selected_match:
+    match = match_options[selected_match]
+    home, away = match.get("home","?"), match.get("away","?")
+    st.write(f"**{home} vs {away}**")
+    st.write("Ottelun ID:", match.get("id","N/A"))
+    st.write("Päivämäärä:", match.get("event_date","N/A"))
 
-        # 2️⃣ Simuloidaan vain placeholder-statistiikalla, jos pelaajadataa ei ole
-        a_serve = float(match.get("homeServeWon", 65)) if "homeServeWon" in match else 65
-        b_serve = float(match.get("awayServeWon", 65)) if "awayServeWon" in match else 65
+    # Placeholder-statistiikka simulaatiota varten
+    home_serve = float(match.get("homeServeWon", 65)) if "homeServeWon" in match else 65
+    away_serve = float(match.get("awayServeWon", 65)) if "awayServeWon" in match else 65
+    st.write(f"{home} syöttöpisteiden voitto-%: {home_serve}")
+    st.write(f"{away} syöttöpisteiden voitto-%: {away_serve}")
 
-        st.write(f"{home} syöttöpisteiden voitto-%: {a_serve}")
-        st.write(f"{away} syöttöpisteiden voitto-%: {b_serve}")
-
-        # 3️⃣ Simulaatiomalli
-        def simulate_match(a_serve, b_serve, n_sim=5000):
-            a_wins = 0
-            for _ in range(n_sim):
-                a_sets, b_sets = 0, 0
-                while a_sets < 2 and b_sets < 2:
-                    a_games, b_games = 0, 0
-                    while a_games < 6 and b_games < 6:
-                        if np.random.rand() < a_serve/(a_serve+b_serve):
-                            a_games += 1
-                        else:
-                            b_games += 1
-                    if a_games > b_games:
-                        a_sets += 1
+    # ===============================
+    # 5️⃣ Simuloi ottelu
+    # ===============================
+    def simulate_match(a_serve, b_serve, n_sim=5000):
+        a_wins = 0
+        for _ in range(n_sim):
+            a_sets, b_sets = 0, 0
+            while a_sets < 2 and b_sets < 2:
+                a_games, b_games = 0, 0
+                while a_games < 6 and b_games < 6:
+                    if np.random.rand() < a_serve/(a_serve+b_serve):
+                        a_games += 1
                     else:
-                        b_sets += 1
-                if a_sets > b_sets:
-                    a_wins += 1
-            return a_wins/n_sim
+                        b_games += 1
+                if a_games > b_games:
+                    a_sets += 1
+                else:
+                    b_sets += 1
+            if a_sets > b_sets:
+                a_wins += 1
+        return a_wins/n_sim
 
-        a_prob = simulate_match(a_serve, b_serve)
-        b_prob = 1 - a_prob
+    home_prob = simulate_match(home_serve, away_serve)
+    away_prob = 1 - home_prob
 
-        st.subheader("🔮 Ennusteet")
-        st.write(f"{home} voittotodennäköisyys: **{a_prob:.2%}**")
-        st.write(f"{away} voittotodennäköisyys: **{b_prob:.2%}**")
+    st.subheader("🔮 Ennusteet")
+    st.write(f"{home} voittotodennäköisyys: **{home_prob:.2%}**")
+    st.write(f"{away} voittotodennäköisyys: **{away_prob:.2%}**")
 
-        # 4️⃣ Vedonlyöntikertoimet & odotusarvo
-        st.subheader("Vedonlyönti")
-        a_odds = st.number_input(f"{home} kerroin", value=2.10, step=0.01)
-        b_odds = st.number_input(f"{away} kerroin", value=1.75, step=0.01)
+    # ===============================
+    # 6️⃣ Vedonlyönti
+    # ===============================
+    st.subheader("Vedonlyönti")
+    home_odds = st.number_input(f"{home} kerroin", value=2.10, step=0.01)
+    away_odds = st.number_input(f"{away} kerroin", value=1.75, step=0.01)
 
-        a_value = a_prob * a_odds
-        b_value = b_prob * b_odds
+    home_value = home_prob * home_odds
+    away_value = away_prob * away_odds
 
-        st.write(f"{home}: odotusarvo = {a_value:.2f} (>{1} = value!)")
-        st.write(f"{away}: odotusarvo = {b_value:.2f} (>{1} = value!)")
+    st.write(f"{home}: odotusarvo = {home_value:.2f} (>{1} = value!)")
+    st.write(f"{away}: odotusarvo = {away_value:.2f} (>{1} = value!)")
+
+# ===============================
+# 7️⃣ Reaaliaikainen live-score (valinnainen)
+# ===============================
+st.subheader("Live-score")
+today = date.today().isoformat()
+livescores = fetch_api("get_livescore", f"&date_start={today}&date_stop={today}")
+for live in livescores[:5]:  # näytä max 5
+    st.write(f"{live.get('home')} vs {live.get('away')} | Score: {live.get('score','N/A')}")
