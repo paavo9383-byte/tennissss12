@@ -630,3 +630,43 @@ if st.button("Näytä Top 10 value bets"):
         st.table(df_top)
     else:
         st.warning("Ei tarpeeksi dataa Top 10 -listaan.")
+# ====================
+# Lasketaan kaikki value-betsit
+# ====================
+match_values = []
+for match in fixtures:
+    odds_data = fetch_odds(match["event_key"])
+    if not odds_data or "Home/Away" not in odds_data:
+        continue
+
+    home_vals = odds_data["Home/Away"].get("Home", {})
+    away_vals = odds_data["Home/Away"].get("Away", {})
+    home_odds = [float(v) for v in home_vals.values() if v]
+    away_odds = [float(v) for v in away_vals.values() if v]
+    if not home_odds or not away_odds:
+        continue
+
+    max_home = max(home_odds)
+    max_away = max(away_odds)
+
+    prob1, prob2 = calculate_probabilities(
+        match["first_player_key"], match["second_player_key"]
+    )
+
+    ev_home = prob1 * max_home
+    ev_away = prob2 * max_away
+
+    match_values.append({
+        "match": f"{match['event_first_player']} vs {match['event_second_player']}",
+        "player": match["event_first_player"],
+        "prob": prob1,
+        "odds": max_home,
+        "value": ev_home
+    })
+    match_values.append({
+        "match": f"{match['event_first_player']} vs {match['event_second_player']}",
+        "player": match["event_second_player"],
+        "prob": prob2,
+        "odds": max_away,
+        "value": ev_away
+    })
