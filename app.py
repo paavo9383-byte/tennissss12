@@ -613,455 +613,81 @@ if run_btn and fixtures:
     else:
         st.info("Ei riittäviä tietoja simulaatioon tälle ottelulle.")
         # ====================
+# Value bet evaluointi
+# ====================
+def evaluate_value(match, n_sim=2000):
+    odds_data = fetch_odds(match["event_key"])
+    if "Home/Away" not in odds_data:
+        return None
+
+    home_vals = odds_data["Home/Away"].get("Home", {})
+    away_vals = odds_data["Home/Away"].get("Away", {})
+
+    try:
+        home_odds = max([float(v) for v in home_vals.values() if v])
+        away_odds = max([float(v) for v in away_vals.values() if v])
+    except ValueError:
+        return None
+
+    prob1, prob2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
+
+    ev_home = prob1 * home_odds
+    ev_away = prob2 * away_odds
+
+    return [
+        {
+            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
+            "Pelaaja": match["event_first_player"],
+            "Todennäköisyys": f"{prob1:.2%}",
+            "Keroin": home_odds,
+            "EV": ev_home,
+            "Turnaus": match.get("tournament_name", "N/A"),
+            "Aika": match.get("event_date", "N/A")
+        },
+        {
+            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
+            "Pelaaja": match["event_second_player"],
+            "Todennäköisyys": f"{prob2:.2%}",
+            "Keroin": away_odds,
+            "EV": ev_away,
+            "Turnaus": match.get("tournament_name", "N/A"),
+            "Aika": match.get("event_date", "N/A")
+        }
+    ]
+
+# ====================
 # Top 10 value bets
 # ====================
 if st.button("Näytä Top 10 Value Bets"):
-    st.subheader("📊 Päivän parhaat value bets")
-
     value_bets = []
     for match in fixtures:
-        odds_data = fetch_odds(match["event_key"])
-        if "Home/Away" not in odds_data:
-            continue
-
-        home_vals = odds_data["Home/Away"].get("Home", {})
-        away_vals = odds_data["Home/Away"].get("Away", {})
-        home_odds = [float(v) for v in home_vals.values() if v]
-        away_odds = [float(v) for v in away_vals.values() if v]
-
-        if not home_odds or not away_odds:
-            continue
-
-        max_home = max(home_odds)
-        max_away = max(away_odds)
-
-        prob1, prob2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
-
-        ev_home = prob1 * max_home
-        ev_away = prob2 * max_away
-
-        value_bets.append({
-            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
-            "Pelaaja": match["event_first_player"],
-            "Todennäköisyys": f"{prob1:.2%}",
-            "Keroin": max_home,
-            "EV": ev_home
-        })
-        value_bets.append({
-            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
-            "Pelaaja": match["event_second_player"],
-            "Todennäköisyys": f"{prob2:.2%}",
-            "Keroin": max_away,
-            "EV": ev_away
-        })
+        res = evaluate_value(match)
+        if res:
+            value_bets.extend(res)
 
     if value_bets:
-        df_value = pd.DataFrame(value_bets)
-        df_sorted = df_value.sort_values("EV", ascending=False).head(10)
-        st.dataframe(df_sorted)
+        df_value = pd.DataFrame(value_bets).sort_values("EV", ascending=False).head(10)
+        st.subheader("📊 Top 10 Value Bets")
+        st.dataframe(df_value)
     else:
-        st.info("Ei tarpeeksi dataa value betseihin tälle päivälle.")
-# -------------------------------------------------
-# YKSI NAPPI: Paras value bet juuri nyt
-# -------------------------------------------------
-def _has_stats(player_key):
-    """Vain kohteet, joissa kummallekin pelaajalle löytyy oikeita stats-rivejä."""
-    p = fetch_player(player_key)
-    return bool(p and isinstance(p.get("stats"), list) and len(p["stats"]) > 0)
+        st.info("Ei tarpeeksi dataa value betseihin.")
 
-def _evaluate_value_for_match(match, n_sim_local: int, bankroll: float):
-    """Laskee parhaan puolen value-mittarit yhdelle ottelulle. Palauttaa dict tai None."""
-    try:
-        p1 = match.get("event_first_player", "-")
-        p2 = match.get("event_second_player", "-")
-        start_str = _parse_time(match.get("event_date"))
-        tourn = match.get("tournament_name", "-")
-        event_key = match.get("event_key")
-
-        # Odds
-        odds_data = fetch_odds(event_key)
-        o1, o2 = extract_two_way_odds(odds_data)
-        if not (o1 and o2 and o1 > 1.0 and o2 > 1.0):
-            return None
-
-        # Varmista että on oikeasti statsit (laadun varmistus)
-        if not (_has_stats(match.get("first_player_key")) and _has_stats(match.get("second_player_key"))):
-            return None
-
-        # Malli + pieni markkinashrinkkaus (vähentää 100–0 outliereita)
-        model = model_probability_for_match(match, n_sim=n_sim_local)
-        p1_prob, p2_prob = model["p1"], model["p2"]
-        imp1, imp2 = _implied_from_odds(o1, o2)
-        if imp1 is not None:
-            p1_prob = 0.85 * p1_prob + 0.15 * imp1
-            p2_prob = 1.0 - p1_prob
-
-        # Edge & EV
-        edge1 = p1_prob - imp1 if imp1 is not None else None
-        edge2 = p2_prob - imp2 if imp2 is not None else None
-        ev1 = p1_prob * o1 - 1.0
-        ev2 = p2_prob * o2 - 1.0
-
-        # Valitse parempi puoli
-        if ev1 is None and ev2 is None:
-            return None
-        best_side = "1" if (ev1 or -9) >= (ev2 or -9) else "2"
-        best_ev = ev1 if best_side == "1" else ev2
-        if best_ev is None or best_ev <= 0:
-            return None  # ei positiivista odotusarvoa
-
-        best_prob = p1_prob if best_side == "1" else p2_prob
-        best_odds = o1 if best_side == "1" else o2
-        best_edge = (edge1 if best_side == "1" else edge2) if (edge1 is not None and edge2 is not None) else (best_prob - 1.0/best_odds)
-
-        # Kelly (puolikas)
-        stake, _ = kelly(best_prob, best_odds, bankroll, fraction=0.5)
-
-        return {
-            "Aika": start_str,
-            "Ottelu": f"{p1} vs {p2}",
-            "Turnaus": tourn,
-            "Puoli": best_side,                     # "1" = Pelaaja 1, "2" = Pelaaja 2
-            "Pelaaja": p1 if best_side == "1" else p2,
-            "Kerroin": round(best_odds, 2),
-            "Malli %": round(best_prob*100, 1),
-            "Implied %": round(((1.0/best_odds) / ((1.0/o1)+(1.0/o2)))*100, 1) if (o1 and o2) else None,
-            "Edge %": round(best_edge*100, 2) if best_edge is not None else None,
-            "EV %": round(best_ev*100, 2),
-            "Kelly €": round(stake, 2),
-            "surface": model.get("surface", "-"),
-            "_ev_raw": best_ev  # sort-avuksi
-        }
-    except Exception:
-        return None
-
-st.markdown("---")
+# ====================
+# Paras value juuri nyt
+# ====================
 st.subheader("🎯 Paras value juuri nyt")
-
-c1, c2 = st.columns([1,3])
-with c1:
-    go_best = st.button("Etsi paras value nyt")
-with c2:
-    st.caption("Käyttää mallin todennäköisyyksiä, maltillista markkinakalibrointia (15%) ja puolikasta Kellyä. Suodattaa ottelut, joista ei ole kunnon pelaajastatseja tai kertoimia.")
+go_best = st.button("🔍 Hae paras value nyt")
 
 if go_best:
     candidates = []
-    # käytä hieman nopeutettua simua tässä haussa
-    n_sim_quick = max(2000, n_sim // 2)
-    for m in fixtures:
-        res = _evaluate_value_for_match(m, n_sim_quick, bankroll)
-        if res:
-            candidates.append(res)
-
-    if not candidates:
-        st.warning("Tällä hetkellä ei löytynyt positiivista odotusarvoa (tai riittävää dataa) valituilla suodattimilla.")
-    else:
-        # paras kohde
-        best = sorted(candidates, key=lambda x: x["_ev_raw"], reverse=True)[0]
-
-        # Näytä suositus-kortti
-        st.success(
-            f"**Suositus:** {best['Ottelu']} — {best['Turnaus']} ({best['Aika']})\n\n"
-            f"**Pelivalinta:** {'P1' if best['Puoli']=='1' else 'P2'} — {best['Pelaaja']}\n\n"
-            f"**Kerroin:** {best['Kerroin']}  |  **Malli:** {best['Malli %']}%  "
-            f"|  **Implied:** {best['Implied %']}%  |  **Edge:** {best['Edge %']}%  "
-            f"|  **EV:** {best['EV %']}%  |  **Kelly‑panos:** {best['Kelly €']} €"
-        )
-
-        # Näytä 4 seuraavaksi parasta referenssiksi
-        others = sorted(candidates, key=lambda x: x["_ev_raw"], reverse=True)[1:5]
-        if others:
-            st.caption("Muut lähellä olevat value‑vaihtoehdot:")
-            show_cols = ["Aika","Ottelu","Turnaus","Puoli","Pelaaja","Kerroin","Malli %","Implied %","Edge %","EV %","Kelly €"]
-            st.table(pd.DataFrame(others)[show_cols])
-            # -------------------------------------------------
-# YKSI NAPPI: Paras value bet juuri nyt
-# -------------------------------------------------
-def _has_stats(player_key):
-    """Vain kohteet, joissa kummallekin pelaajalle löytyy oikeita stats-rivejä."""
-    p = fetch_player(player_key)
-    return bool(p and isinstance(p.get("stats"), list) and len(p["stats"]) > 0)
-
-def _evaluate_value_for_match(match, n_sim_local: int, bankroll: float):
-    """Laskee parhaan puolen value-mittarit yhdelle ottelulle. Palauttaa dict tai None."""
-    try:
-        p1 = match.get("event_first_player", "-")
-        p2 = match.get("event_second_player", "-")
-        start_str = _parse_time(match.get("event_date"))
-        tourn = match.get("tournament_name", "-")
-        event_key = match.get("event_key")
-
-        # Odds
-        odds_data = fetch_odds(event_key)
-        o1, o2 = extract_two_way_odds(odds_data)
-        if not (o1 and o2 and o1 > 1.0 and o2 > 1.0):
-            return None
-
-        # Varmista että on oikeasti statsit
-        if not (_has_stats(match.get("first_player_key")) and _has_stats(match.get("second_player_key"))):
-            return None
-
-        # Malli + pieni markkinashrinkkaus
-        model = model_probability_for_match(match, n_sim=n_sim_local)
-        p1_prob, p2_prob = model["p1"], model["p2"]
-        imp1, imp2 = _implied_from_odds(o1, o2)
-        if imp1 is not None:
-            p1_prob = 0.85 * p1_prob + 0.15 * imp1
-            p2_prob = 1.0 - p1_prob
-
-        # Edge & EV
-        edge1 = p1_prob - imp1 if imp1 is not None else None
-        edge2 = p2_prob - imp2 if imp2 is not None else None
-        ev1 = p1_prob * o1 - 1.0
-        ev2 = p2_prob * o2 - 1.0
-
-        # Valitse parempi puoli
-        if ev1 is None and ev2 is None:
-            return None
-        best_side = "1" if (ev1 or -9) >= (ev2 or -9) else "2"
-        best_ev = ev1 if best_side == "1" else ev2
-        if best_ev is None or best_ev <= 0:
-            return None
-
-        # Edge-kynnys: vähintään 2 %-yks
-        best_edge = (edge1 if best_side == "1" else edge2) if (edge1 is not None and edge2 is not None) else (best_ev / best_side)
-        if best_edge is None or best_edge < 0.02:
-            return None
-
-        best_prob = p1_prob if best_side == "1" else p2_prob
-        best_odds = o1 if best_side == "1" else o2
-
-        # Kelly (puolikas)
-        stake, _ = kelly(best_prob, best_odds, bankroll, fraction=0.5)
-
-        return {
-            "Aika": start_str,
-            "Ottelu": f"{p1} vs {p2}",
-            "Turnaus": tourn,
-            "Puoli": best_side,
-            "Pelaaja": p1 if best_side == "1" else p2,
-            "Kerroin": round(best_odds, 2),
-            "Malli %": round(best_prob*100, 1),
-            "Implied %": round(((1.0/best_odds) / ((1.0/o1)+(1.0/o2)))*100, 1) if (o1 and o2) else None,
-            "Edge %": round(best_edge*100, 2) if best_edge is not None else None,
-            "EV %": round(best_ev*100, 2),
-            "Kelly €": round(stake, 2),
-            "_ev_raw": best_ev
-        }
-    except Exception:
-        return None
-
-st.markdown("---")
-st.subheader("🎯 Paras value juuri nyt")
-
-c1, c2 = st.columns([1,3])
-with c1:
-    go_best = st.button("Etsi paras value nyt")
-with c2:
-    st.caption("Käyttää mallin todennäköisyyksiä, markkinakalibrointia (15%) ja puolikasta Kellyä. Näyttää vain kohteet, joissa Edge ≥ 2 %-yks.")
-
-if go_best:
-    candidates = []
-    # käytä nopeutettua simulaatiota
-    n_sim_quick = max(2000, n_sim // 2)
-    for m in fixtures:
-        res = _evaluate_value_for_match(m, n_sim_quick, bankroll)
-        if res:
-            candidates.append(res)
-
-    if not candidates:
-        st.warning("Tällä hetkellä ei löytynyt riittävän hyvää valuea.")
-    else:
-        # paras kohde
-        best = sorted(candidates, key=lambda x: x["_ev_raw"], reverse=True)[0]
-
-        # Näytä paras suositus
-        st.success(
-            f"**Suositus:** {best['Ottelu']} — {best['Turnaus']} ({best['Aika']})\n\n"
-            f"**Pelivalinta:** {'P1' if best['Puoli']=='1' else 'P2'} — {best['Pelaaja']}\n\n"
-            f"**Kerroin:** {best['Kerroin']}  |  **Malli:** {best['Malli %']}%  "
-            f"|  **Implied:** {best['Implied %']}%  |  **Edge:** {best['Edge %']}%  "
-            f"|  **EV:** {best['EV %']}%  |  **Kelly-panos:** {best['Kelly €']} €"
-        )
-
-        # Näytä 4 muuta kovinta
-        others = sorted(candidates, key=lambda x: x["_ev_raw"], reverse=True)[1:5]
-        if others:
-            st.caption("Muut lähellä olevat value-vaihtoehdot:")
-            show_cols = ["Aika","Ottelu","Turnaus","Pelaaja","Kerroin","Malli %","Implied %","Edge %","EV %","Kelly €"]
-            st.table(pd.DataFrame(others)[show_cols])
-# ===============================
-# SIMULOINTI JA KAAVIO (Altair)
-# ===============================
-import altair as alt
-
-if st.button("Simuloi ja piirrä"):
-    st.subheader("Simulaatiotulokset (1000 ottelua)")
-
-    sim_data = []
     for match in fixtures:
-        prob1, prob2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
-        wins1 = np.random.binomial(1000, prob1)
-        wins2 = 1000 - wins1
-
-        sim_data.append({
-            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
-            "Pelaaja": match['event_first_player'],
-            "Voitot": wins1
-        })
-        sim_data.append({
-            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
-            "Pelaaja": match['event_second_player'],
-            "Voitot": wins2
-        })
-
-    sim_df = pd.DataFrame(sim_data)
-
-    st.dataframe(sim_df)
-
-    chart = alt.Chart(sim_df).mark_bar().encode(
-        x=alt.X("Ottelu:N", sort=None, title="Ottelu"),
-        y=alt.Y("Voitot:Q", title="Voitot simulaatiossa"),
-        color="Pelaaja:N",
-        tooltip=["Ottelu", "Pelaaja", "Voitot"]
-    ).properties(width=700, height=400)
-
-    st.altair_chart(chart, use_container_width=True)
-
-
-# ===============================
-# TOP 10 VALUE BETS
-# ===============================
-if st.button("Näytä Top 10 Value Bets"):
-    st.subheader("📊 Päivän parhaat value bets")
-
-    value_bets = []
-    for match in fixtures:
-        odds_data = fetch_odds(match["event_key"])
-        if "Home/Away" not in odds_data:
-            continue
-
-        home_vals = odds_data["Home/Away"].get("Home", {})
-        away_vals = odds_data["Home/Away"].get("Away", {})
-        home_odds = [float(v) for v in home_vals.values() if v]
-        away_odds = [float(v) for v in away_vals.values() if v]
-
-        if not home_odds or not away_odds:
-            continue
-
-        max_home = max(home_odds)
-        max_away = max(away_odds)
-
-        prob1, prob2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
-
-        ev_home = prob1 * max_home
-        ev_away = prob2 * max_away
-
-        value_bets.append({
-            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
-            "Pelaaja": match["event_first_player"],
-            "Todennäköisyys": f"{prob1:.2%}",
-            "Keroin": max_home,
-            "EV": ev_home
-        })
-        value_bets.append({
-            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
-            "Pelaaja": match["event_second_player"],
-            "Todennäköisyys": f"{prob2:.2%}",
-            "Keroin": max_away,
-            "EV": ev_away
-        })
-
-    if value_bets:
-        df_value = pd.DataFrame(value_bets)
-        df_sorted = df_value.sort_values("EV", ascending=False).head(10)
-        st.dataframe(df_sorted)
-    else:
-        st.info("Ei tarpeeksi dataa value betseihin tälle päivälle.")
-
-
-# ===============================
-# PARAS VALUE BET JUURI NYT
-# ===============================
-def _has_stats(player_key):
-    p = fetch_player(player_key)
-    return bool(p and isinstance(p.get("stats"), list) and len(p["stats"]) > 0)
-
-def _evaluate_value_for_match(match, n_sim_local: int, bankroll: float):
-    try:
-        p1 = match.get("event_first_player", "-")
-        p2 = match.get("event_second_player", "-")
-        tourn = match.get("tournament_name", "-")
-        event_key = match.get("event_key")
-
-        odds_data = fetch_odds(event_key)
-        o1, o2 = extract_two_way_odds(odds_data)
-        if not (o1 and o2 and o1 > 1.0 and o2 > 1.0):
-            return None
-
-        if not (_has_stats(match.get("first_player_key")) and _has_stats(match.get("second_player_key"))):
-            return None
-
-        model = model_probability_for_match(match, n_sim=n_sim_local)
-        p1_prob, p2_prob = model["p1"], model["p2"]
-
-        # implied prob shrinkkaus
-        imp1, imp2 = _implied_from_odds(o1, o2)
-        if imp1 is not None:
-            p1_prob = 0.85 * p1_prob + 0.15 * imp1
-            p2_prob = 1.0 - p1_prob
-
-        edge1 = p1_prob - imp1 if imp1 is not None else None
-        edge2 = p2_prob - imp2 if imp2 is not None else None
-        ev1 = p1_prob * o1 - 1.0
-        ev2 = p2_prob * o2 - 1.0
-
-        best_side = "1" if (ev1 or -9) >= (ev2 or -9) else "2"
-        best_ev = ev1 if best_side == "1" else ev2
-        if best_ev is None or best_ev <= 0:
-            return None
-
-        best_edge = edge1 if best_side == "1" else edge2
-        if best_edge is None or best_edge < 0.02:
-            return None
-
-        best_prob = p1_prob if best_side == "1" else p2_prob
-        best_odds = o1 if best_side == "1" else o2
-        stake, _ = kelly(best_prob, best_odds, bankroll, fraction=0.5)
-
-        return {
-            "Ottelu": f"{p1} vs {p2}",
-            "Turnaus": tourn,
-            "Pelaaja": p1 if best_side == "1" else p2,
-            "Kerroin": round(best_odds, 2),
-            "Malli %": round(best_prob*100, 1),
-            "Edge %": round(best_edge*100, 2),
-            "EV %": round(best_ev*100, 2),
-            "Kelly €": round(stake, 2),
-            "_ev_raw": best_ev
-        }
-    except Exception:
-        return None
-
-st.markdown("---")
-st.subheader("🎯 Paras value juuri nyt")
-
-if st.button("Etsi paras value nyt"):
-    candidates = []
-    n_sim_quick = max(2000, n_sim // 2)
-    for m in fixtures:
-        res = _evaluate_value_for_match(m, n_sim_quick, bankroll)
+        res = evaluate_value(match, n_sim=2000)
         if res:
-            candidates.append(res)
+            candidates.extend(res)
 
     if not candidates:
-        st.warning("Tällä hetkellä ei löytynyt riittävän hyvää valuea.")
+        st.warning("Ei löytynyt value betsiä juuri nyt.")
     else:
-        best = sorted(candidates, key=lambda x: x["_ev_raw"], reverse=True)[0]
-        st.success(
-            f"**Ottelu:** {best['Ottelu']} — {best['Turnaus']}\n\n"
-            f"**Pelivalinta:** {best['Pelaaja']}\n\n"
-            f"**Kerroin:** {best['Kerroin']}  |  **Malli:** {best['Malli %']}%  "
-            f"|  **Edge:** {best['Edge %']}%  |  **EV:** {best['EV %']}%  "
-            f"|  **Kelly-panos:** {best['Kelly €']} €"
-        )
+        best = sorted(candidates, key=lambda x: x["EV"], reverse=True)[0]
+        st.success("Paras value löytyi!")
+        st.json(best)
