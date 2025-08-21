@@ -6,33 +6,50 @@ from datetime import date
 
 API_KEY = "52a26b83b9dcb13ebcf0790bbac97ea14eeaaf75f88ec4661f98b9ab9009bf76"
 
-# --- API kutsut ---
+# ---------------------------
+# API-funktiot
+# ---------------------------
 @st.cache_data
 def fetch_fixtures(date_str):
     url = f"https://api.api-tennis.com/tennis/?method=get_fixtures&APIkey={API_KEY}&date_start={date_str}&date_stop={date_str}"
-    res = requests.get(url); data = res.json()
-    return data["result"] if data.get("success") == 1 else []
+    res = requests.get(url)
+    data = res.json()
+    if data["success"] == 1:
+        return data["result"]
+    return []
 
 @st.cache_data
 def fetch_player(player_key):
     url = f"https://api.api-tennis.com/tennis/?method=get_players&APIkey={API_KEY}&player_key={player_key}"
-    res = requests.get(url); data = res.json()
-    return data["result"][0] if data.get("success") == 1 and data.get("result") else None
+    res = requests.get(url)
+    data = res.json()
+    if data["success"] == 1 and data["result"]:
+        return data["result"][0]
+    return None
 
 @st.cache_data
 def fetch_h2h(p1_key, p2_key):
     url = f"https://api.api-tennis.com/tennis/?method=get_H2H&APIkey={API_KEY}&first_player_key={p1_key}&second_player_key={p2_key}"
-    res = requests.get(url); data = res.json()
-    return data.get("result") if data.get("success") == 1 else {"H2H": [], "firstPlayerResults": [], "secondPlayerResults": []}
+    res = requests.get(url)
+    data = res.json()
+    if data["success"] == 1:
+        return data["result"]
+    return {"H2H": [], "firstPlayerResults": [], "secondPlayerResults": []}
 
 @st.cache_data
 def fetch_odds(match_key):
     url = f"https://api.api-tennis.com/tennis/?method=get_odds&APIkey={API_KEY}&match_key={match_key}"
-    res = requests.get(url); data = res.json()
-    return data.get("result", {}).get(str(match_key), {}) if data.get("success") == 1 else {}
+    res = requests.get(url)
+    data = res.json()
+    if data["success"] == 1 and "result" in data:
+        return data["result"].get(str(match_key), {})
+    return {}
 
-# --- Todennäköisyysmalli ---
+# ---------------------------
+# Analyysi
+# ---------------------------
 def calculate_probabilities(p1_key, p2_key):
+    """Mallin perusprobabiliteetit H2H + stats"""
     h2h = fetch_h2h(p1_key, p2_key)
     games = h2h.get("H2H", [])
     if games:
@@ -40,7 +57,7 @@ def calculate_probabilities(p1_key, p2_key):
         p2_wins = sum(1 for g in games if g.get("event_winner") == "Second Player")
         total = p1_wins + p2_wins
         if total > 0:
-            return p1_wins / total, p2_wins / total
+            return p1_wins/total, p2_wins/total
 
     player1 = fetch_player(p1_key)
     player2 = fetch_player(p2_key)
@@ -56,75 +73,122 @@ def calculate_probabilities(p1_key, p2_key):
                 return wins / (wins + losses)
         return 0.5
 
-    r1, r2 = get_ratio(player1), get_ratio(player2)
-    return (r1 / (r1 + r2), r2 / (r1 + r2)) if (r1 + r2) > 0 else (0.5, 0.5)
+    r1 = get_ratio(player1)
+    r2 = get_ratio(player2)
+    if r1 + r2 > 0:
+        return r1/(r1+r2), r2/(r1+r2)
+    return 0.5, 0.5
 
-# --- UI ---
-st.title("🎾 Tennis-ennusteet ja value betit")
+def monte_carlo_simulation(p1_prob, p2_prob, sims=10000):
+    wins1 = np.random.binomial(sims, p1_prob)
+    wins2 = sims - wins1
+    return wins1/sims, wins2/sims
 
+# ---------------------------
+# Streamlit UI
+# ---------------------------
+st.title("🎾 Tennis-ennusteet ja Value Bets")
+
+# Suodattimet
 today = date.today()
 sel_date = st.sidebar.date_input("Päivämäärä", value=today)
 match_type = st.sidebar.selectbox("Ottelutyyppi", ["Kaikki", "Live", "Tulevat"])
-show_value = st.sidebar.checkbox("Näytä vain parhaat value bets")
 
 fixtures = fetch_fixtures(sel_date.isoformat())
+
 if match_type == "Live":
     fixtures = [m for m in fixtures if m.get("event_live") == "1"]
 elif match_type == "Tulevat":
     fixtures = [m for m in fixtures if m.get("event_live") == "0" and not m.get("event_status")]
 
-results = []
+# Turnausvalikko
+tournaments = sorted(set(m.get("tournament_name") for m in fixtures))
+sel_tournament = st.sidebar.selectbox("Turnaus", ["Kaikki"] + tournaments)
+if sel_tournament != "Kaikki":
+    fixtures = [m for m in fixtures if m.get("tournament_name") == sel_tournament]
+
+# ---------------------------
+# Mallin analyysi
+# ---------------------------
+st.header("Mallin analyysi (tilastot + H2H)")
+
+rows = []
 for match in fixtures:
-    p1, p2 = match["event_first_player"], match["event_second_player"]
-    prob1, prob2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
+    p1, p2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
     odds_data = fetch_odds(match["event_key"])
-
-    home_odds, away_odds = [], []
+    home_odds, away_odds = None, None
     if "Home/Away" in odds_data:
-        home_odds = [float(v) for v in odds_data["Home/Away"].get("Home", {}).values() if v]
-        away_odds = [float(v) for v in odds_data["Home/Away"].get("Away", {}).values() if v]
+        home_vals = odds_data["Home/Away"].get("Home", {})
+        away_vals = odds_data["Home/Away"].get("Away", {})
+        if home_vals: home_odds = max(float(v) for v in home_vals.values() if v)
+        if away_vals: away_odds = max(float(v) for v in away_vals.values() if v)
 
-    max_home, max_away = (max(home_odds) if home_odds else None, max(away_odds) if away_odds else None)
-    imp_p1, imp_p2 = (1 / max_home if max_home else None, 1 / max_away if max_away else None)
+    implied1 = 1/home_odds if home_odds else None
+    implied2 = 1/away_odds if away_odds else None
 
-    value_p1 = (prob1 - imp_p1) if imp_p1 else 0
-    value_p2 = (prob2 - imp_p2) if imp_p2 else 0
+    val1 = (p1 - implied1) if (p1 and implied1) else None
+    val2 = (p2 - implied2) if (p2 and implied2) else None
 
-    results.append({
-        "match": f"{p1} vs {p2}",
-        "tournament": match["tournament_name"],
-        "market_odds_p1": max_home,
-        "market_odds_p2": max_away,
-        "model_p1_prob": round(prob1, 3),
-        "model_p2_prob": round(prob2, 3),
-        "implied_p1": round(imp_p1, 3) if imp_p1 else None,
-        "implied_p2": round(imp_p2, 3) if imp_p2 else None,
-        "value_p1": value_p1,
-        "value_p2": value_p2,
-        "value_icon_p1": "💰" if value_p1 > 0 else "",
-        "value_icon_p2": "💰" if value_p2 > 0 else "",
-        "best_value": max(value_p1, value_p2)
+    rows.append({
+        "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
+        "Turnaus": match["tournament_name"],
+        "Aloitusaika": match.get("event_date"),
+        "Mallin P1%": round(p1*100,1),
+        "Mallin P2%": round(p2*100,1),
+        "Kerroin P1": home_odds,
+        "Kerroin P2": away_odds,
+        "Value P1": val1,
+        "Value P2": val2,
+        "p1_prob_model": p1,
+        "p2_prob_model": p2
     })
 
-df = pd.DataFrame(results)
+df = pd.DataFrame(rows)
+st.dataframe(df[["Ottelu","Turnaus","Aloitusaika","Mallin P1%","Mallin P2%","Kerroin P1","Kerroin P2","Value P1","Value P2"]])
 
-# --- TOP 3 aina näkyvissä ---
-if not df.empty:
-    top3 = df.sort_values("best_value", ascending=False).head(3)
-    st.subheader("🔥 Päivän Top 3 Value Bettiä")
-    cols = st.columns(3)
-    for i, row in enumerate(top3.itertuples()):
-        cols[i].metric(
-            label=row.match,
-            value=f"{row.best_value:.3f}",
-            delta=f"Kertoimet: {row.market_odds_p1} / {row.market_odds_p2}"
-        )
+# Top 3 model value bets
+st.subheader("🏆 Top 3 Model Value Bets")
+all_values = []
+for _, row in df.iterrows():
+    if row["Value P1"] is not None:
+        all_values.append((row["Ottelu"], "P1", row["Value P1"]))
+    if row["Value P2"] is not None:
+        all_values.append((row["Ottelu"], "P2", row["Value P2"]))
+top3_model = sorted(all_values, key=lambda x: x[2], reverse=True)[:3]
+st.table(pd.DataFrame(top3_model, columns=["Ottelu","Pelaaja","Value"]))
 
-# --- Näytetään taulukko ---
-if show_value and not df.empty:
-    value_df = df[(df["value_p1"] > 0) | (df["value_p2"] > 0)].sort_values("best_value", ascending=False)
-    st.header("📊 Päivän parhaat value bets")
-    st.dataframe(value_df)
-else:
-    st.header("📊 Kaikki ottelut ja analyysi")
-    st.dataframe(df)
+# ---------------------------
+# Simulaatio
+# ---------------------------
+st.sidebar.subheader("Simulaatio")
+num_sims = st.sidebar.slider("Simulaatioiden määrä", min_value=1000, max_value=20000, step=1000, value=10000)
+
+if st.button("Simuloi"):
+    st.header(f"Monte Carlo -simulaatiot ({num_sims} ajoa)")
+    sim_rows = []
+    sim_values = []
+    for _, row in df.iterrows():
+        sim_p1, sim_p2 = monte_carlo_simulation(row["p1_prob_model"], row["p2_prob_model"], sims=num_sims)
+        odds1, odds2 = row["Kerroin P1"], row["Kerroin P2"]
+        val1 = (sim_p1 - (1/odds1)) if odds1 else None
+        val2 = (sim_p2 - (1/odds2)) if odds2 else None
+
+        sim_rows.append({
+            "Ottelu": row["Ottelu"],
+            "Sim P1%": round(sim_p1*100,1),
+            "Sim P2%": round(sim_p2*100,1),
+            "Kerroin P1": odds1,
+            "Kerroin P2": odds2,
+            "Value P1": val1,
+            "Value P2": val2
+        })
+
+        if val1 is not None: sim_values.append((row["Ottelu"], "P1", val1))
+        if val2 is not None: sim_values.append((row["Ottelu"], "P2", val2))
+
+    sim_df = pd.DataFrame(sim_rows)
+    st.dataframe(sim_df)
+
+    st.subheader("🏆 Top 3 Simulation Value Bets")
+    top3_sim = sorted(sim_values, key=lambda x: x[2], reverse=True)[:3]
+    st.table(pd.DataFrame(top3_sim, columns=["Ottelu","Pelaaja","Value"]))
