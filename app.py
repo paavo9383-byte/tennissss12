@@ -13,6 +13,18 @@ def get_player_stats(player_name):
     if not row.empty:
         return row.iloc[0].to_dict()
     return None
+    stats1 = get_player_stats(match["event_first_player"])
+stats2 = get_player_stats(match["event_second_player"])
+
+if stats1 and stats2:
+    p1_hold = stats1.get("hold_pct", 0.7)
+    p2_hold = stats2.get("hold_pct", 0.7)
+
+    # arvioidaan todennäköisyys pelaajan 1 voitolle
+    prob1 = p1_hold / (p1_hold + (1 - p2_hold))
+    prob2 = 1 - prob1
+else:
+    prob1, prob2 = 0.5, 0.5
 # =========================================
 # Asetukset
 # =========================================
