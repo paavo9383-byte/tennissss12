@@ -612,3 +612,52 @@ if run_btn and fixtures:
         )
     else:
         st.info("Ei riittäviä tietoja simulaatioon tälle ottelulle.")
+        # ====================
+# Top 10 value bets
+# ====================
+if st.button("Näytä Top 10 Value Bets"):
+    st.subheader("📊 Päivän parhaat value bets")
+
+    value_bets = []
+    for match in fixtures:
+        odds_data = fetch_odds(match["event_key"])
+        if "Home/Away" not in odds_data:
+            continue
+
+        home_vals = odds_data["Home/Away"].get("Home", {})
+        away_vals = odds_data["Home/Away"].get("Away", {})
+        home_odds = [float(v) for v in home_vals.values() if v]
+        away_odds = [float(v) for v in away_vals.values() if v]
+
+        if not home_odds or not away_odds:
+            continue
+
+        max_home = max(home_odds)
+        max_away = max(away_odds)
+
+        prob1, prob2 = calculate_probabilities(match["first_player_key"], match["second_player_key"])
+
+        ev_home = prob1 * max_home
+        ev_away = prob2 * max_away
+
+        value_bets.append({
+            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
+            "Pelaaja": match["event_first_player"],
+            "Todennäköisyys": f"{prob1:.2%}",
+            "Keroin": max_home,
+            "EV": ev_home
+        })
+        value_bets.append({
+            "Ottelu": f"{match['event_first_player']} vs {match['event_second_player']}",
+            "Pelaaja": match["event_second_player"],
+            "Todennäköisyys": f"{prob2:.2%}",
+            "Keroin": max_away,
+            "EV": ev_away
+        })
+
+    if value_bets:
+        df_value = pd.DataFrame(value_bets)
+        df_sorted = df_value.sort_values("EV", ascending=False).head(10)
+        st.dataframe(df_sorted)
+    else:
+        st.info("Ei tarpeeksi dataa value betseihin tälle päivälle.")
